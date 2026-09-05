@@ -1,1 +1,79 @@
+import os
+import torch
+import numpy as np
+from torch.utils.data import DataLoader, Subset
+from torchvision import transforms
+from torchvision.datasets import OxfordIIITPet
+from sklearn.model_selection import StratifiedShuffleSplit
 
+
+def get_dataloaders(data_root="./data", batch_size=32, num_workers=2,
+                    download=True, seed=42):
+    # 下载数据集（Kaggle网络OK，会自动下载）
+    full_dataset = OxfordIIITPet(root=data_root, download=download, transform=None)
+
+    # 获取所有标签用于分层划分
+    labels = [full_dataset[i][1] for i in range(len(full_dataset))]
+
+    from collections import Counter
+    print(f"总样本数: {len(full_dataset)}")
+    print(f"类别数: {len(set(labels))}")
+
+    # 按 70:15:15 分层划分
+    sss = StratifiedShuffleSplit(n_splits=1, test_size=0.3, random_state=seed)
+    train_idx, temp_idx = next(sss.split(range(len(full_dataset)), labels))
+
+    temp_labels = [labels[i] for i in temp_idx]
+    sss2 = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=seed)
+    val_idx, test_idx = next(sss2.split(range(len(temp_idx)), temp_labels))
+
+    # 映射回原始索引
+    val_idx = [temp_idx[i] for i in val_idx]
+    test_idx = [temp_idx[i] for i in test_idx]
+
+    print(f"训练集: {len(train_idx)}, 验证集: {len(val_idx)}, 测试集: {len(test_idx)}")
+
+    # 保存索引供后续使用
+    torch.save(train_idx, os.path.join(data_root, 'train_idx.pt'))
+    torch.save(val_idx, os.path.join(data_root, 'val_idx.pt'))
+    torch.save(test_idx, os.path.join(data_root, 'test_idx.pt'))
+
+    # 训练集：增强 + 标准化
+    train_transform = transforms.Compose([
+        transforms.Resize((256, 256)),
+        transforms.RandomCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    # 验证集/测试集：只做标准处理，不做随机增强
+    val_transform = transforms.Compose([
+        transforms.Resize((256, 256)),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    # 重新加载数据集，分别应用不同的transform
+    train_dataset = OxfordIIITPet(root=data_root, download=False, transform=train_transform)
+    val_dataset = OxfordIIITPet(root=data_root, download=False, transform=val_transform)
+    test_dataset = OxfordIIITPet(root=data_root, download=False, transform=val_transform)
+
+    # 用之前保存的索引取子集
+    train_dataset = Subset(train_dataset, train_idx)
+    val_dataset = Subset(val_dataset, val_idx)
+    test_dataset = Subset(test_dataset, test_idx)
+
+    # 创建DataLoader
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+
+    # 检查一下数据形状
+    for images, labels in train_loader:
+        print(f"输入Batch形状: {images.shape}")  # 应该是 [32, 3, 224, 224]
+        break
+
+    num_classes = len(set(labels))
+    return train_loader, val_loader, test_loader, num_classes
